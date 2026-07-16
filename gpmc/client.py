@@ -585,14 +585,28 @@ class Client:
             Failed uploads are logged but don't stop the overall process.
         """
         if skip_existing_filenames:
-            # Query all existing filenames from database to avoid scaling issues
+            # Collect all filenames from the current upload batch
+            batch_filenames = set()
+            for path, value in path_hash_pairs.items():
+                filename = value.get("filename") if isinstance(value, dict) else None
+                effective_filename = filename if filename else path.name
+                batch_filenames.add(effective_filename)
+
+            # Query database only for filenames present in the current batch (using index-only chunked IN queries)
             existing_filenames = set()
             try:
+                batch_filenames_list = list(batch_filenames)
+                chunk_size = 500
                 with Storage(self.db_path) as storage:
-                    cursor = storage.conn.execute("SELECT file_name FROM remote_media WHERE file_name IS NOT NULL")
-                    existing_filenames = {row[0] for row in cursor.fetchall()}
+                    for i in range(0, len(batch_filenames_list), chunk_size):
+                        chunk = batch_filenames_list[i : i + chunk_size]
+                        placeholders = ", ".join("?" * len(chunk))
+                        query = f"SELECT file_name FROM remote_media WHERE file_name IN ({placeholders})"
+                        cursor = storage.conn.execute(query, chunk)
+                        existing_filenames.update(row[0] for row in cursor.fetchall())
             except Exception as e:
-                self.logger.debug(f"Failed to query existing filenames from cache: {e}")
+                self.logger.error(f"Failed to query existing filenames from cache database: {e}")
+                raise
 
             seen_in_batch = set()
             filtered_pairs = {}
